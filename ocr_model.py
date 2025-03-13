@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torchvision.transforms as transforms
 from PIL import Image
+import os
 
 # Definir el modelo OCR con CNN + LSTM
 class OCRModel(nn.Module):
@@ -14,8 +15,8 @@ class OCRModel(nn.Module):
         self.relu = nn.ReLU()
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
         
-        # LSTM
-        self.lstm = nn.LSTM(input_size=2048, hidden_size=128, num_layers=2, batch_first=True, bidirectional=True)
+        # La salida de la CNN tiene un tamaño [batch, 256, 4, 16], por lo que el input_size debe ser 256 * 4 = 1024
+        self.lstm = nn.LSTM(input_size=1024, hidden_size=128, num_layers=2, batch_first=True, bidirectional=True)
         self.fc = nn.Linear(128 * 2, num_classes)  # bidireccional LSTM → 2 * hidden_size
 
     def forward(self, x):
@@ -28,18 +29,17 @@ class OCRModel(nn.Module):
         x = self.relu(self.conv3(x))
         x = self.pool(x)
 
-        batch_size, channels, height, width = x.shape  # [batch, 256, 8, 16]
-        print("Tamaño después de conv3 y pool:", x.shape)  # 🛑 Depuración
+        batch_size, channels, height, width = x.shape  # [batch, 256, 4, 16]
 
         x = x.permute(0, 3, 1, 2).contiguous()  # [batch, width, channels, height]
-        x = x.view(batch_size, width, channels * height)  # [1, 16, 2048]
+        x = x.view(batch_size, width, channels * height)  # [1, 16, 1024] → ahora coincide con input_size de LSTM
 
         x, _ = self.lstm(x)
         x = self.fc(x)  # [batch, width, num_classes]
         return x
 
-# Función de entrenamiento
-def train_ocr(image_path, expected_text, epochs=10):
+# Función de entrenamiento con guardado de checkpoint
+def train_ocr(image_path, expected_text, epochs=100, checkpoint_path="ocr_checkpoint.pth"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Usando dispositivo: {device}")
 
@@ -59,7 +59,17 @@ def train_ocr(image_path, expected_text, epochs=10):
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-    for epoch in range(epochs):
+    start_epoch = 0
+
+    # Cargar checkpoint si existe
+    if os.path.exists(checkpoint_path):
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(checkpoint["model_state"])
+        optimizer.load_state_dict(checkpoint["optimizer_state"])
+        start_epoch = checkpoint["epoch"]
+        print(f"🔄 Checkpoint encontrado. Reanudando desde la epoch {start_epoch}")
+
+    for epoch in range(start_epoch, epochs):
         optimizer.zero_grad()
         output = model(image_tensor)  # Forward pass
         loss = criterion(output.view(-1, num_classes), torch.randint(0, num_classes, (output.size(0) * output.size(1),)).to(device))  
@@ -68,6 +78,14 @@ def train_ocr(image_path, expected_text, epochs=10):
 
         print(f"Epoch {epoch+1}/{epochs}, Loss: {loss.item()}")
 
+        # Guardar checkpoint cada 10 epochs
+        if (epoch + 1) % 10 == 0:
+            torch.save({
+                "epoch": epoch + 1,
+                "model_state": model.state_dict(),
+                "optimizer_state": optimizer.state_dict()
+            }, checkpoint_path)
+            print(f"✅ Checkpoint guardado en epoch {epoch+1}")
 
 # Datos de entrenamiento
 expected_text = """PRUEBAS HÚMEDO
@@ -83,7 +101,7 @@ A: 3
 B: 5
 C: 4.5
 ESTABILIDAD DIMENSIONAL
-Encogimiento %
+Encogimiento %:
 Ancho: -2.6
 Largo: -7.6
 PRUEBAS FÍSICAS
@@ -98,5 +116,6 @@ Entorche Largo: B"""
 
 # Ruta de la imagen
 image_path = "formato1.jpeg"
-# Ejecutar entrenamiento con una imagen
-train_ocr(image_path, expected_text, epochs=10)
+
+# Ejecutar entrenamiento con checkpoint
+train_ocr(image_path, expected_text, epochs=5000)
